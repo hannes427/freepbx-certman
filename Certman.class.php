@@ -14,8 +14,12 @@ use Symfony\Component\Process\Exception\ProcessFailedException;
 use Symfony\Component\Process\Process;
 use Exception;
 
-#[\AllowDynamicProperties]
 class Certman implements BMO {
+	public $FreePBX;
+	public $db;
+	public $PKCS;
+	public $goto;
+	private $days_expiration_alert;
 	/* Asterisk Defaults */
 	private $defaults = array(
 		"sip" => array(

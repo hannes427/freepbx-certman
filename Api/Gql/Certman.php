@@ -11,6 +11,7 @@ use FreePBX\modules\Api\Gql\Base;
  */
 class Certman extends Base {
 	protected $module = 'certman';
+	protected $PKCS;
 	
 	/**
 	 * queryCallback
