@@ -470,7 +470,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 
 			//Validation
 			$error = false;
-			$errors = array();
+			$errors[] = _('Could not save ACME configuration. The following errors occurred');
 			//ACME script path
 			if(!preg_match('/^\/[A-Za-z0-9\._\-\/]+\/acme\.sh$/', $acmeBinary)) {
 				$errors[] = _('Invalid acme.sh binary path');
@@ -512,45 +512,48 @@ class Certman extends \FreePBX_Helpers implements BMO {
 				$errors[] = _('Invalid Certificate renew mechanism');
 				$error = true ;
 			}
-			if(!empty($errors)) {
-				$this->message = array('type' => 'danger', 'message' => implode("<br>", $errors));
+			if($error) {
+				$this->message = array('type' => 'danger', 'message' => implode("<br>", array_map('htmlspecialchars', $errors)));
 				return ;
-			}
-			//Validation end
-			if($error == false) {
+			} else {
 				if(!is_dir($acmeConfDir)) {
 					if(!@mkdir($acmeConfDir, 0700, true)) {
 						$this->message = array('type' => 'danger', 'message' => _('Failed to create configuration directory'));
 						return ;
 					}
 				}
-				$set_ca = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --set-default-ca --server letsencrypt", $caOutput, $caExitCode);
+				$set_ca = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --set-default-ca --server letsencrypt 2>&1", $caOutput, $caExitCode);
 				if($caExitCode != 0) {
-					$this->message = array('type' => 'danger', 'message' => implode("<br>", $caOutput));
+					$errormsg = _('Could not save ACME configuration. The following errors occurred<br>') . implode("<br>", array_map('htmlspecialchars', $caOutput));
+					$this->message = array('type' => 'danger', 'message' => $errormsg);
 					return ;
 				}
-				$register_account = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --register-account", $regOutput, $regExitCode);
+				$register_account = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --register-account 2>&1", $regOutput, $regExitCode);
 				if($regExitCode != 0) {
-					$this->message = array('type' => 'danger', 'message' => implode("<br>", $regOutput));
+					$errormsg = _('Could not save ACME configuration. The following errors occurred<br>') . implode("<br>", array_map('htmlspecialchars', $regOutput));
+					$this->message = array('type' => 'danger', 'message' => $errormsg);
 					return ;
 				}
-				$update_email = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --update-account --accountemail '" . escapeshellarg($acmeEmail) . "'", $emailOutput, $emailExitCode);
+				$update_email = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --update-account --accountemail '" . escapeshellarg($acmeEmail) . "' 2>&1", $emailOutput, $emailExitCode);
 				if($emailExitCode != 0) {
-					$this->message = array('type' => 'danger', 'message' => implode("<br>", $emailOutput));
+					$errormsg = _('Could not save ACME configuration. The following errors occurred<br>') . implode("<br>", array_map('htmlspecialchars', $emailOutput));
+					$this->message = array('type' => 'danger', 'message' => $errormsg);
 					return ;
 				}
 				if($acmeUpdateMethod == 'cron') {
 					$this->removeCronJob();
-					$add_cron = exec('HOME=' . escapeshellarg($acmeConfDir) . ' ' . escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --installcronjob", $cronOutput, $cronExitCode);
+					$add_cron = exec('HOME=' . escapeshellarg($acmeConfDir) . ' ' . escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --installcronjob 2>&1", $cronOutput, $cronExitCode);
 					if($cronExitCode != 0) {
-						$this->message = array('type' => 'danger', 'message' => implode("<br>", $cronOutput));
+						$errormsg = _('Could not save ACME configuration. The following errors occurred<br>') . implode("<br>", array_map('htmlspecialchars', $cronOutput));
+						$this->message = array('type' => 'danger', 'message' => $errormsg);
 						return ;
 					}
 				}
 				elseif($acmeUpdateMethod == 'freepbx') {
-					$add_cron = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --uninstallcronjob", $cronOutput, $cronExitCode);
-					if($cronExitCode != 0) {
-						$this->message = array('type' => 'danger', 'message' => implode("<br>", $cronOutput));
+					$remove_cron = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --uninstallcronjob 2>&1", $cronDelOutput, $cronDelExitCode);
+					if($cronDelExitCode != 0) {
+						$errormsg = _('Could not save ACME configuration. The following errors occurred<br>') . implode("<br>", array_map('htmlspecialchars', $cronDelOutput));
+						$this->message = array('type' => 'danger', 'message' => $errormsg);
 						return ;
 					}
 					$this->addAutoUpdateCron();
