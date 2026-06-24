@@ -15,7 +15,7 @@ use Symfony\Component\Process\Process;
 use Exception;
 
 #[\AllowDynamicProperties]
-class Certman implements BMO {
+class Certman extends \FreePBX_Helpers implements BMO {
 	/* Asterisk Defaults */
 	private $defaults = array(
 		"sip" => array(
@@ -461,8 +461,109 @@ class Certman implements BMO {
 				}
 			break;
 		}
-		return true;
+		if(isset($request['acmesettings'])) {
+			//Save ACME settings
+			$acmeBinary = trim($request['acmeBinary'] ?? '');
+			$acmeConfDir = trim($request['acmeConfDir'] ?? '');
+			$acmeEmail = trim($request['acmeEmail'] ?? '');
+			$acmeUpdateMethod = trim($request['acmeUpdateMethod'] ?? '');
+
+			//Validation
+			$error = false;
+			$errors = array();
+			//ACME script path
+			if(!preg_match('/^\/[A-Za-z0-9\._\-\/]+\/acme\.sh$/', $acmeBinary)) {
+				$errors[] = _('Invalid acme.sh binary path');
+				$error = true ;
+			}
+			if(!is_file($acmeBinary)) {
+				$errors[] = _('acme.sh binary does not exist');
+				$error = true ;
+			}
+			if(!is_executable($acmeBinary)) {
+				$errors[] = _('acme.sh is not executable');
+				$error = true;
+			}
+			//ACME Config dir
+			if(!preg_match('#^/[A-Za-z0-9._/-]+$#', $acmeConfDir)) {
+				$errors[] = _('Invalid ACME configuration path');
+				$error = true ;
+			}
+			if(is_dir($acmeConfDir)) {
+				if (!is_writable($acmeConfDir)) {
+					$errors[] = _('ACME configuration directory is not writable');
+					$error = true;
+				}
+			}
+			else {
+				$parent = dirname($acmeConfDir);
+				if(is_dir($parent) && !is_writable($parent)) {
+					$errors[] = _('ACME configuration directory is not writable');
+					$error = true;
+				}
+			}
+			//ACME eMail
+			if($acmeEmail !== '' && !filter_var($acmeEmail, FILTER_VALIDATE_EMAIL)) {
+				$errors[] = _('Invalid ACME eMail address');
+				$error = true ;
+			}
+			//ACME Update Method
+			if(!in_array($acmeUpdateMethod, ['cron', 'freepbx'], true)) {
+				$errors[] = _('Invalid Certificate renew mechanism');
+				$error = true ;
+			}
+			if(!empty($errors)) {
+				$this->message = array('type' => 'danger', 'message' => implode("<br>", $errors));
+				return ;
+			}
+			//Validation end
+			if($error == false) {
+				if(!is_dir($acmeConfDir)) {
+					if(!@mkdir($acmeConfDir, 0700, true)) {
+						$this->message = array('type' => 'danger', 'message' => _('Failed to create configuration directory'));
+						return ;
+					}
+				}
+				$set_ca = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --set-default-ca --server letsencrypt", $caOutput, $caExitCode);
+				if($caExitCode != 0) {
+					$this->message = array('type' => 'danger', 'message' => implode("<br>", $caOutput));
+					return ;
+				}
+				$register_account = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --register-account", $regOutput, $regExitCode);
+				if($regExitCode != 0) {
+					$this->message = array('type' => 'danger', 'message' => implode("<br>", $regOutput));
+					return ;
+				}
+				$update_email = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --update-account --accountemail '" . escapeshellarg($acmeEmail) . "'", $emailOutput, $emailExitCode);
+				if($emailExitCode != 0) {
+					$this->message = array('type' => 'danger', 'message' => implode("<br>", $emailOutput));
+					return ;
+				}
+				if($acmeUpdateMethod == 'cron') {
+					$this->removeCronJob();
+					$add_cron = exec('HOME=' . escapeshellarg($acmeConfDir) . ' ' . escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --installcronjob", $cronOutput, $cronExitCode);
+					if($cronExitCode != 0) {
+						$this->message = array('type' => 'danger', 'message' => implode("<br>", $cronOutput));
+						return ;
+					}
+				}
+				elseif($acmeUpdateMethod == 'freepbx') {
+					$add_cron = exec(escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --uninstallcronjob", $cronOutput, $cronExitCode);
+					if($cronExitCode != 0) {
+						$this->message = array('type' => 'danger', 'message' => implode("<br>", $cronOutput));
+						return ;
+					}
+					$this->addAutoUpdateCron();
+				}
+			}
+			$this->setConfig('acmeBinary', $acmeBinary);
+			$this->setConfig('acmeConfdir', $acmeConfDir);
+			$this->setconfig('acmeEmail', $acmeEmail);
+			$this->setConfig('acmeUpdateMethod', $acmeUpdateMethod);
+		}
+	return true;
 	}
+
 	public function myShowPage($view=''){
 		$view = !empty($this->goto) ? $this->goto : $view;
 		$request = $_REQUEST;
@@ -543,6 +644,16 @@ class Certman implements BMO {
 					}
 				}
 			break;
+			case 'showAcmeSettings':
+				// Display/edit settings for the ACME client
+				 $acmeBinary = $this->getConfig('acmeBinary') ?: '/home/asterisk/.acme.sh/acme.sh';
+				// Since acme.sh is not installed in the user’s home directory when installed via a package manager, 
+				// we need to store the path to the acme.sh configuration directory separately
+				$acmeConfDir = $this->getConfig('acmeConfDir') ?: '/home/asterisk/.acme.sh';
+				$acmeEmail = $this->getConfig('acmeEmail') ?: '';
+				$acmeUpdateMethod = $this->getConfig('acmeUpdateMethod') ?: '';
+				echo load_view(__DIR__ . '/views/acmesettings.php',['acmeBinary' => $acmeBinary, 'acmeConfDir' => $acmeConfDir, 'acmeEmail' => $acmeEmail,'acmeUpdateMethod' => $acmeUpdateMethod]);
+			break;
 			default:
 				$certs = $this->getAllManagedCertificates();
 				$csr = $this->checkCSRexists();
@@ -581,6 +692,9 @@ class Certman implements BMO {
 				case 'new':
 					unset($buttons['delete']);
 					$buttons['submit']['value'] = isset($_REQUEST['type']) && $_REQUEST['type'] == 'csr' ? _('Generate CSR') : _('Generate Certificate');
+				break;
+				case "showAcmeSettings":
+					$buttons['submit']['value'] = _('Save');
 				break;
 				default:
 					$buttons = array();
