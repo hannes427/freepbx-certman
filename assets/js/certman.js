@@ -115,6 +115,24 @@ $(function() {
 			if($(this).attr("name") == "ST" || $(this).attr("name") == "L" || $(this).attr("name") == "OU") {
 				return true;
 			}
+
+			//Acmesettings eMail
+			if($(this).attr("name") == "acmeEmail") {
+				console.log("Debug");
+				var value = $(this).val();
+				if(value === "") {
+					return true;
+				}
+				var pattern = $(this).attr("pattern");
+				var regex = new RegExp(pattern);
+				if(!regex.test(value)) {
+					warnInvalid($(this), $(this).data("invalid"));
+					stop = true;
+					return false;
+				}
+				return true;
+			}
+
 			if ($(this).val() === "") {
 				warnInvalid($(this),_("Can not be left blank!"));
 				stop = true;
@@ -125,10 +143,6 @@ $(function() {
 			return false;
 		}
 		if(type == "le") {
-			if($("#ST").val() === "") {
-				warnInvalid($("#ST"),_("State can not be left blank!"));
-				return false;
-			}
 			if($("#host").val() === "") {
 				warnInvalid($("#host"),_("Host Name can not be left blank!"));
 				return false;

@@ -1,20 +1,28 @@
-<script type='text/javascript' src='modules/certman/assets/js/views/regions.js?123'></script>
+<script>
+let dns_provider = '<?= $cert['additional']['dns_provider'] ?? '' ?>';
+</script>
+<script src='modules/certman/assets/js/views/le.js'></script>
 <?php
+if(!empty($acmeMessage)) {
+	$acmeMessageHtml = '<div class="alert alert-' . $acmeMessage['type'] .'">'. $acmeMessage['message'] . '</div>';
+}
 if(!empty($message)) {
 	$messagehtml = '<div class="alert alert-' . $message['type'] .'">'. $message['message'] . '</div>';
 }
 
 $alert = "<div class='alert alert-info'><h3>"._("Important")."</h3>";
-$alert .= "<p>"._("Let's Encrypt certificate creation and validation requires unrestricted inbound http access on port 80 to the Let's Encrypt token directories")." </p>";
+$alert .= "<p>"._("When using the HTTP challenge, Let's Encrypt certificate creation and validation requires unrestricted inbound HTTP access on port 80 to the Let's Encrypt token directories.")." </p>";
 $alert .= "<p>"._("If security is managed by the PBX Firewall module, this process should be automatic. Alternate security methods and external firewalls will require manual configuration.")." </p>";
 $alert .= "<p>"._("For more information see: ")."<a href='https://wiki.sangoma.com/display/FPG/Certificate+Management+User+Guide' target='_blank'>https://wiki.sangoma.com/display/FPG/Certificate+Management+User+Guide</a> </p>";
+$alert .= "<p>"._("When using the DNS challenge, no modifications to the firewall configuration are necessary.")." </p>";
 $alert .= "</div>";
 ?>
 
 <div class="container-fluid">
 	<h1><?php echo !empty($cert['cid']) ? _("Edit Let's Encrypt Certificate") : _("New Let's Encrypt Certificate")?></h1>
+	<?php echo !empty($acmeMessageHtml) ? $acmeMessageHtml : "" ?>
 	<?php echo !empty($messagehtml) ? $messagehtml : "" ?>
-	<div class='alert alert-info'><?php echo $alert; printf(_("Let's Encrypt Certificates are <strong>automatically</strong> updated by %s when required (Approximately every 2 months). Do not install your own certificate updaters!"), \FreePBX::Config()->get("DASHBOARD_FREEPBX_BRAND")); ?></div>
+	<div class='alert alert-info'><?php echo $alert; printf(_("Let's Encrypt Certificates are <strong>automatically</strong> updated either by %s or by acme.sh when required (Approximately every 2 months). Do not install your own certificate updaters!"), \FreePBX::Config()->get("DASHBOARD_FREEPBX_BRAND")); ?></div>
 	<div class = "display full-border">
 		<div class="row">
 			<div class="col-sm-12">
@@ -33,6 +41,7 @@ $alert .= "</div>";
 								</h3>
 							</div>
 							<div class="section" data-id="edit-cert">
+								<!-- Hostname -->
 								<div class="element-container">
 									<div class="row">
 										<div class="form-group form-horizontal">
@@ -53,51 +62,26 @@ $alert .= "</div>";
 										</div>
 									</div>
 								</div>
+								<!-- END Hostname -->
+
+								<!-- eMail -->
 								<div class="element-container">
 									<div class="row">
 										<div class="form-group form-horizontal">
 											<div class="col-md-3">
-												<label class="control-label" for="email"><?php echo _("Owners Email")?></label>
+												<label class="control-label" for="email"><?php echo _("ACME account Email")?></label>
 												<i class="fa fa-question-circle fpbx-help-icon" data-for="email"></i>
 											</div>
 											<div class="col-md-9">
-												<input type="text" class="form-control" id="email" name="email" placeholder="you@example.com" required value="<?php echo $cert['additional']['email'] ?? ""; ?>">
+												<?php echo $settings['acmeEmail'] ?? ""; ?>
 											</div>
 										</div>
 										<div class="col-md-12">
-											<span id="email-help" class="help-block fpbx-help-block" style=""><?php echo _("This email address is given to Let's Encrypt. It may be used by them if the certificate is approaching expiration and it has not been renewed.")?></span>
+											<span id="email-help" class="help-block fpbx-help-block" style=""><?php echo _("The email address is managed at account level. Please use the ACME settings page to update it.")?></span>
 										</div>
 									</div>
 								</div>
-
-								<div class="element-container">
-									<div class="row">
-										<div class="form-group form-horizontal">
-											<div class="col-md-3">
-												<label class="control-label" for="C"><?php echo _("Country")?></label>
-											</div>
-											<div class="col-md-9">
-												<?php
-													$country = !empty($cert['additional']['C']) ? $cert['additional']['C'] : "CA";
-													$state = !empty($cert['additional']['ST']) ? $cert['additional']['ST'] : "Ontario";
-												?>
-												<select class="form-control" id="C" name="C" data-current="<?php echo $country; ?>" disabled> </select>
-											</div>
-										</div>
-									</div>
-								</div>
-								<div class="element-container">
-									<div class="row">
-										<div class="form-group form-horizontal">
-											<div class="col-md-3">
-												<label class="control-label" for="st"><?php echo _("State/Province/Region")?></label>
-											</div>
-											<div class="col-md-9">
-												<select class="form-control" id="ST" name="ST" data-current="<?php echo $state; ?>"> </select>
-											</div>
-										</div>
-									</div>
-								</div>
+								<!-- END eMail -->
 
 								<!-- Alternative Names -->
 								<div class="element-container">
@@ -129,34 +113,68 @@ $alert .= "</div>";
 												<i class="fa fa-question-circle fpbx-help-icon" data-for="challengetype"></i>
 											</div>
 											<div class="col-md-9">
-												<span class="form-control" disabled><strong>HTTP <?php echo _("(Port 80)"); ?></strong></span>
+												<select class="form-control" id="challengetype" name="challengetype">
+                                                    <option value="http01" <?php echo !empty($cert['additional']['challenge']) && $cert['additional']['challenge'] == 'http01' ? 'selected': ''?>>HTTP</option>
+                                                    <option value="dns01" <?php echo !empty($cert['additional']['challenge']) && $cert['additional']['challenge'] == 'dns01' ? 'selected': ''?>>DNS</option>
+                                                </select>
 											</div>
 										</div>
 										<div class="col-md-12">
-											<span id="challengetype-help" class="help-block fpbx-help-block"><?php echo _("LetsEncrypt only supports hostname validation via HTTP on port 80.")?></span>
+											<span id="challengetype-help" class="help-block fpbx-help-block"><?php echo _("Choose how domain ownership should be validated for certificate issuance.<br>HTTP validation requires inbound access on port 80. DNS validation requires supported DNS API credentials.")?></span>
 										</div>
 									</div>
 								</div>
 								<!-- END Challenge Method -->
 
-								<!-- Remove DST Root CA X3 -->
-								<div class="element-container">
-									<div class="row">
-										<div class="form-group form-horizontal">
-											<div class="col-md-3">
-												<label class="control-label" for="removeDstRootCaX3"><?php echo _("Remove DST Root CA X3")?></label>
-												<i class="fa fa-question-circle fpbx-help-icon" data-for="removeDstRootCaX3"></i>
+								<!-- DNS Settings (hidden by default) -->
+								<div id="dnssettings" style="display: none;">
+									<!-- DNS Provider -->
+									 <div class="element-container">
+										<div class="row">
+											<div class="form-group form-horizontal">
+												<div class="col-md-3">
+													<label class="control-label" for="dnsprovider"><?php echo _("DNS Provider")?></label>
+													<i class="fa fa-question-circle fpbx-help-icon" data-for="dnsprovider"></i>
+												</div>
+												<div class="col-md-9">
+													<div id="dnsprovidercontainer"></div>
+												</div>
 											</div>
-											<div class="col-md-9">
-												<input type="checkbox" id="removeDstRootCaX3" name="removeDstRootCaX3" <?php echo (!empty($cert['additional']['removeDstRootCaX3']) && $cert['additional']['removeDstRootCaX3'] ? "checked" : ""); ?>>
+											<div class="col-md-12">
+												<span id="dnsprovider-help" class="help-block fpbx-help-block"><?php echo _("Enter your DNS API provider.<br>See the official acme.sh <a href=\"https://github.com/acmesh-official/acme.sh/wiki/dnsapi\">wiki</a> for a list of supported providers and their required credential settings.")?></span>
 											</div>
-										</div>
-										<div class="col-md-12">
-											<span id="removeDstRootCaX3-help" class="help-block fpbx-help-block"><?php echo _("The Let's Encrypt bundled 'DST Root CA X3' can cause issues with older clients. This option removes the 'DST Root CA X3' from the certificate bundle.")?></span>
 										</div>
 									</div>
+									<!-- END DNS Provider -->
+
+									<!-- DNS API Credentials container -->
+									<div id="credentialscontainer">
+										<!-- DNS API Credentials -->
+										<div class="element-container">
+											<div class="row">
+												<div class="form-group form-horizontal">
+													<div class="col-md-3">
+														<label class="control-label" for="dnsapi"><?php echo _("DNS API Credentials")?></label>
+														<i class="fa fa-question-circle fpbx-help-icon" data-for="dnsapi"></i>
+													</div>
+													<div class="col-md-9">
+														<?php if (!empty($cert['additional']['dnskeys'])) { ?>
+															<button type="button" class="btn btn-default" id="enableDnsEdit"><?php echo _("Edit DNS Credentials") ?></button>
+														<?php } else { ?>
+															<i id="addDnsCredential" class="fa fa-plus" style="cursor:pointer;"></i>
+														<?php } ?>
+													</div>
+												</div>
+												<div class="col-md-12">
+													<span id="dnsapi-help" class="help-block fpbx-help-block"><?php echo _("Click the add button to add the required DNS API credentials as key-value pairs.")?></span>
+												</div>
+											</div>
+										</div>
+										<!-- END DNS API Credentials -->
+									</div>
+									<!-- END DNS API Credentials container -->
 								</div>
-								<!-- END DST Root CA X3 -->
+								<!-- END DNS Settings -->
 							</div>
 							<!-- END Section -->
 

@@ -286,42 +286,89 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			case "add":
 				switch($request['type']) {
 					case "le":
-						$host = basename(strtolower($_POST['host']));
+						$errors = [];
+						$host = trim(strtolower($_POST['host'] ?? ''));
+						$san = array_unique(array_filter(array_map('trim', explode("\n", strtolower($_POST['SAN'] ?? '')))));
+						$challengetype = $_POST['challengetype'] ?? '';
+						$dnsprovider = trim($_POST['dnsprovider'] ?? '');
+						$dnsKeys = $_POST['dnsKeys'] ?? [];
+						$dnsValues = $_POST['dnsValues'] ?? [];
+						if(!filter_var($host, FILTER_VALIDATE_DOMAIN)) {
+							$errors[] = _('Invalid hostname');
+						}
 						$description = $host;
-						$san = array_unique(array_filter(array_map('trim', explode("\n", strtolower($_POST['SAN'])))));
 						if (!empty($san)) {
-							if ($key = array_search($host, $san)) {
-								unset($key);
+							if (($key = array_search($host, $san, true)) !== false) {
+								unset($san[$key]);
 							}
 							sort($san);
+							foreach($san AS $tmp) {
+								if(!filter_var($tmp, FILTER_VALIDATE_DOMAIN)) {
+									$errors[] = _('Invalid Alternative name ' . htmlspecialchars($tmp));
+								}
+							}
 							$description .= ", " . implode(", ", $san);
 						}
-						$removeDstRootCaX3 = (!empty($_POST['removeDstRootCaX3']) && $_POST['removeDstRootCaX3'] ? true : false);
+						$additional = [];
+						if(!in_array($challengetype, ['dns01', 'http01'], true)) {
+							$errors[] = _('Invalid challenge type');
+						}
+						if($challengetype === 'dns01') {
+							if(empty($dnsprovider)) {
+								$errors[] = _('DNS provider may not be empty');
+							}
+							elseif(!preg_match('/^dns_[a-z0-9]{2,}$/', $dnsprovider)) {
+								$errors[] = _('Invalid DNS provider');
+							}
+							if(count($dnsKeys) !== count($dnsValues)) {
+    							$errors[] = _('DNS API credentials are inconsistent');
+							}
+							foreach($dnsKeys AS $key => $value) {
+								$value = trim($value);
+								$dnsKeys[$key] = $value;
+								if($value === '') {
+									$errors[] = _('DNS API Key may not be empty');
+								}
+								elseif(!preg_match('/^[A-Za-z][A-Za-z0-9_]{1,63}$/', $value)) {
+									$errors[] = _('Invalid DNS API Key' . htmlspecialchars($value));
+								}
+							}
+							foreach($dnsValues AS $key => $value) {
+								$value = trim($value);
+								$dnsValues[$key] = $value;
+								/**
+								 * he content of the API key cannot be strictly validated, as different
+								 * providers may also use special characters or “dangerous” characters
+								 * in their credentials. Only a limited set of characters can be checked
+								 */
+								if(!preg_match('/^[^\r\n\0]*$/', $value)) {
+									$errors[] = _('Invalid character in DNS Api credential value');
+								}
+							}
+						}
 						$additional = array(
-								"C" => $_POST['C'],
-								"ST" => $_POST['ST'],
-								"email" => $_POST['email'],
-								"removeDstRootCaX3" => $removeDstRootCaX3,
+								'challengetype' => $challengetype,
+								'dnsprovider' => $dnsprovider,
 						);
 						if (!empty($san)) {$additional['san'] = $san;}
+						if (!empty($errors)) {
+        					$this->message = ['type' => 'danger','message' => implode("<br>", $errors)];
+        					break 2;
+    					}
 						ob_start();
 						try{
 							if($this->checkCertificateName($host)) {
 								throw new Exception(sprintf(_("%s already exists!"),$host));
 							}
-							$this->updateLE($host, array(
-								"countryCode" => $_POST['C'],
-								"state" => $_POST['ST'],
-								"challengetype" => "http", // https will not work
-								"email" => $_POST['email'],
-								"san" => $san,
-								"removeDstRootCaX3" => $removeDstRootCaX3,
-							));
+							$this->updateLE($host, $additional, $dnsKeys, $dnsValues);
 							$this->saveCertificate(null, $host, $description, 'le', $additional);
 						} catch(Exception $e) {
 							$lelog = trim(ob_get_contents());
 							ob_end_clean();
-							$einfo = json_decode(substr($e->getMessage(), strpos($e->getMessage(), '{')), true);
+							$einfo = json_decode($e->getMessage(), true);
+							if (!is_array($einfo)) {
+    							$einfo = [];
+							}
 							$api = $this->getFirewallAPI();
 							$leoptions = $api->getLeOptions();
 							if (!empty($einfo['detail'])) {
@@ -597,7 +644,15 @@ class Certman extends \FreePBX_Helpers implements BMO {
 					case 'le':
 						// Have we been asked to update firewall rules?
 						$hostname = $this->PKCS->getHostname();
-						echo load_view(__DIR__.'/views/le.php',array('message' => $this->message, 'hostname' => $hostname));
+
+						//Load acmesettings
+						$settings = $this->loadAcmeSettings();
+						$acmeMessage = array();
+						if($settings['acmeBinary'] == '' || $settings['acmeConfDir'] == '') {
+							$acmeMessage = array('type' => 'danger', 'message' => _('You have to set the <a href="/admin/config.php?display=certman&action=showAcmeSettings">ACME settings</a> before you can issue a certificate'));
+						}
+
+						echo load_view(__DIR__.'/views/le.php',array('message' => $this->message, 'hostname' => $hostname, 'settings' => $settings, 'acmeMessage' => $acmeMessage));
 					break;
 					case 'up':
 						$csrs = $this->getAllManagedCSRs();
@@ -649,13 +704,8 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			break;
 			case 'showAcmeSettings':
 				// Display/edit settings for the ACME client
-				 $acmeBinary = $this->getConfig('acmeBinary') ?: '/home/asterisk/.acme.sh/acme.sh';
-				// Since acme.sh is not installed in the user’s home directory when installed via a package manager, 
-				// we need to store the path to the acme.sh configuration directory separately
-				$acmeConfDir = $this->getConfig('acmeConfDir') ?: '/home/asterisk/.acme.sh';
-				$acmeEmail = $this->getConfig('acmeEmail') ?: '';
-				$acmeUpdateMethod = $this->getConfig('acmeUpdateMethod') ?: '';
-				echo load_view(__DIR__ . '/views/acmesettings.php',['acmeBinary' => $acmeBinary, 'acmeConfDir' => $acmeConfDir, 'acmeEmail' => $acmeEmail,'acmeUpdateMethod' => $acmeUpdateMethod]);
+				 $settings = $this->loadAcmeSettings(true);
+				echo load_view(__DIR__ . '/views/acmesettings.php', $settings);
 			break;
 			default:
 				$certs = $this->getAllManagedCertificates();
@@ -666,6 +716,40 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			break;
 		}
 	}
+
+	/**
+	 * loadAcmeSettings
+	 * 
+	 * This function loads the ACME settings and returns them as an associative array. 
+	 * If withDefaults is set to true, default values are returned for missing or 
+	 * empty configuration keys.
+	 *
+	 * @param  bool $withDefaults
+	 * @return array
+	 */
+	private function loadAcmeSettings(bool $withDefaults = false) {
+		$acmeBinary = $this->getConfig('acmeBinary');
+		// Since acme.sh is not installed in the user’s home directory when installed via a package manager, 
+		// we need to store the path to the acme.sh configuration directory separately
+		$acmeConfDir = $this->getConfig('acmeConfDir');
+		$acmeEmail = $this->getConfig('acmeEmail');
+		$acmeUpdateMethod = $this->getConfig('acmeUpdateMethod');
+		if (!$withDefaults) {
+			return [
+				'acmeBinary' => $acmeBinary,
+				'acmeConfDir' => $acmeConfDir,
+				'acmeEmail' => $acmeEmail,
+				'acmeUpdateMethod' => $acmeUpdateMethod,
+			];
+		}
+		return [
+				'acmeBinary' => $acmeBinary ?: '/home/asterisk/.acme.sh/acme.sh',
+				'acmeConfDir' => $acmeConfDir ?: '/home/asterisk/.acme.sh',
+				'acmeEmail' => $acmeEmail ?: '',
+				'acmeUpdateMethod' => $acmeUpdateMethod ?: '',
+			];
+	}
+
 	public function getActionBar($request) {
 		$buttons = array();
 		$request['action'] = !empty($request['action']) ? $request['action'] : "";
@@ -861,49 +945,17 @@ class Certman extends \FreePBX_Helpers implements BMO {
 	}
 
 	/**
-	 * Parse CA bundle into an array
-	 * @param string $contents the contents of the bundle
-	 * 
-	 * @return array An array of certificates
-	 */
-	function parseCaBundle($contents) {
-		$matches = array();
-		preg_match_all('/-----BEGIN CERTIFICATE-----.*-----END CERTIFICATE-----/sU', $contents, $matches);
-		if (empty($matches)) {
-			return array($contents);
-		}
-
-		return $matches[0];
-	}
-
-	/**
-	 * Remove DST Root CA X3 from an array of certs
-	 * @param array $certs An array of certificates
-	 * 
-	 * @return array An array of certificates
-	 */
-	function removeDstRootCaX3FromBundle($certs) {
-		$results = array();
-		foreach($certs as $cert) {
-			$certDetails = openssl_x509_parse($cert);
-			if (empty($certDetails['issuer']) || !in_array("DST Root CA X3", $certDetails['issuer'])) {
-				$results[] = $cert;
-			}
-		}
-
-	   return $results;
-	}
-
-	/**
 	 * Update or Add Let's Encrypt
 	 * @param  string $host     The hostname (MUST BE A VALID FQDN)
 	 * @param  array $settings  Array of settings for this certificate
+	 * @param  array $dnsKeys	DNS API credential variable names (only used when challenge type is dns01)
+	 * @param  array $dnsValues	DNS API credential values (only used when challenge type is dns01)
 	 * @param  boolean $staging Whether to use the staging server or not
 	 * @param  boolean $force Force renew reguardless of expiration date
 	 *
 	 * @return boolean          True if success, false if not
 	 */
-	public function updateLE($host, $settings = false, $staging = false, $force = false) {
+	public function updateLE($host, $settings = false, $dnsKeys = [], $dnsValues = [], $staging = false, $force = false) {
 		/**
 		 * Enable LE rules and set a delay for disabling LE rules.
 		 * The time remaining is between 1 and 2 minutes before to close the door.
@@ -915,26 +967,38 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			throw new Exception("BUG: Settings is not an array. Old code?");
 		}
 
-		if(!$this->checkFirewallAndIpset()){
+		if($settings['challengetype'] === 'http01' && !$this->checkFirewallAndIpset()){
 			throw new Exception("Please install ipset package And Restart the Firewall to continue");
 		}
+		$acmesettings = $this->loadAcmeSettings(false);
+		if($acmesettings['acmeBinary'] === '' || $acmesettings['acmeConfDir'] === '') {
+			throw new Exception("Please configure acme.sh (binary and config directory) in Certman before issuing Let's Encrypt certificates.");
+		}
 		// Get our variables from $settings
-		$countryCode = !empty($settings['countryCode']) ? $settings['countryCode'] : 'CA';
-		$state = !empty($settings['state']) ? $settings['state'] : 'Ontario';
-		$challengetype = "http"; // Always http
-		$email = !empty($settings['email']) ? $settings['email'] : '';
+		$challengetype = !empty($settings['challengetype']) ? $settings['challengetype'] : '';
 		$san = !empty($settings['san']) ? $settings['san'] : array();
-		$removeDstRootCaX3 = !empty($settings['removeDstRootCaX3']) ? $settings['removeDstRootCaX3'] : false;
+		if($challengetype === 'dns01') {
+			$dnsprovider =  !empty($settings['dnsprovider']) ? $settings['dnsprovider'] : '';
+		}
 
+		$acmeAction = '';
+		//do we need to update the DNS API credentials?
+		$updateDnsCredentials = false;
 		$location = $this->PKCS->getKeysLocation();
-		// $logger = $this->FreePBX->Logger->monoLog;
-		$logger = new \Monolog\Logger('');
 		$host = basename($host);
-		$certpath = $location . "/" .$host;
+		// $host may start with '*' for wildcard-only certificates.
+		// Sanitize before generating filesystem paths.
+		if (str_starts_with($host, '*.')) {
+			$exportName = 'wildcard_' . substr($host, 2);
+		}
+		else {
+			$exportName = $host;
+		}
+		$exportBase = $location . '/' . $exportName;
 		array_unshift($san, $host);
 
 		$needsgen = false;
-		$certfile = $certpath . "/" . $host."/cert.pem";
+		$certfile = $exportBase . ".crt";
 
 		$user = $this->FreePBX->Config->get("AMPASTERISKWEBUSER");
 		$group = $this->FreePBX->Config->get("AMPASTERISKWEBGROUP");
@@ -945,6 +1009,8 @@ class Certman extends \FreePBX_Helpers implements BMO {
 		if (!file_exists($certfile)) {
 			// We don't have a cert, so we need to request one.
 			$needsgen = true;
+			$acmeAction = '--issue';
+			$updateDnsCredentials = true;
 		} else {
 			// We DO have a certificate.
 			$certdata = openssl_x509_parse(file_get_contents($certfile));
@@ -953,143 +1019,161 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			if (time() > $renewafter || $force) {
 				// Less than a month left, we need to renew.
 				$needsgen = true;
+				$acmeAction = '--renew';
 			}
 		}
 
 		try{
-			$this->enableFirewallLeRules();
+			if($challengetype =='http01') {
+				$this->enableFirewallLeRules();
 
-			$localip = gethostbyname($host);
-			$localip = @inet_pton($localip) ? $localip : 'dns error';
-			$publicip = $this->getPublicIP($host);
-			$publicip = (!empty($publicip) && @inet_pton($publicip[0])) ? $publicip[0] : 'dns error';
+				$localip = gethostbyname($host);
+				$localip = @inet_pton($localip) ? $localip : 'dns error';
+				$publicip = $this->getPublicIP($host);
+				$publicip = (!empty($publicip) && @inet_pton($publicip[0])) ? $publicip[0] : 'dns error';
 
-			print(sprintf(_("Processing: %s, Local IP: %s, Public IP: %s\n"), $host, $localip, $publicip));
+				print(sprintf(_("Processing: %s, Local IP: %s, Public IP: %s\n"), $host, $localip, $publicip));
 
-			//self-test first
-			//	if this fails the equivalent code in Lesript.php will fail cryptically
-			if($needsgen) {
-				$basePathCheck = "/.freepbx-known";
-				if(!file_exists($webroot.$basePathCheck)) {
-					$mkdirok = @mkdir($webroot.$basePathCheck,0777);
-					if (!$mkdirok) {
-						throw new Exception(_("Unable to create directory ").$webroot.$basePathCheck);
+				//self-test first
+				//	if this fails the equivalent code in Lesript.php will fail cryptically
+				if($needsgen) {
+					$basePathCheck = "/.freepbx-known";
+					if(!file_exists($webroot.$basePathCheck)) {
+						$mkdirok = @mkdir($webroot.$basePathCheck,0777);
+						if (!$mkdirok) {
+							throw new Exception(_("Unable to create directory ").$webroot.$basePathCheck);
+						}
 					}
-				}
-				$token = bin2hex(openssl_random_pseudo_bytes(16));
-				$pathCheck = $basePathCheck."/".$token;
-				file_put_contents($webroot.$pathCheck,$token);
+					$token = bin2hex(openssl_random_pseudo_bytes(16));
+					$pathCheck = $basePathCheck."/".$token;
+					file_put_contents($webroot.$pathCheck,$token);
 
-				print(_("Self test: trying ") . "http://" . $host.$pathCheck . "\n");
-				$pest = new \Pest("http://".$host);
-				$pest->curl_opts[CURLOPT_FOLLOWLOCATION] = true;
-				$pest->curl_opts[CURLOPT_CONNECTTIMEOUT] = 5;
-				$pest->curl_opts[CURLOPT_TIMEOUT] = 5;
-				try {
-					$selftest = $pest->get($pathCheck);
-				} catch(Exception $e) {
-					$selftesterr = _("Self test error: ") . get_class($e) . " - " . trim(strip_tags($e->getMessage()));
-					$hints[] = sprintf(_("Does DNS for %s resolve correctly?\nLocal DNS result: %s, External DNS result: %s"), $host, $localip, $publicip);
-					print($selftesterr ."\n");
-					@unlink($webroot.$pathCheck);
-					throw new Exception(json_print_pretty(json_encode(array('type' => 'selftest', 'detail' => $selftesterr)), "  "));
-				}
-				if(empty($selftest)) {
-					$selftesterr = _("Self test error: no token data");
-					print($selftesterr ."\n");
-					@unlink($webroot.$pathCheck);
-					throw new Exception($selftesterr);
-				}
-				print("Self test: received ". $selftest . "\n");
-
-			//Now check freepbx.org
-			//	on failure, save error as hint and continue
-				try {
-					$pest = new \PestJSON('http://mirror1.freepbx.org');
+					print(_("Self test: trying ") . "http://" . $host.$pathCheck . "\n");
+					$pest = new \Pest("http://".$host);
 					$pest->curl_opts[CURLOPT_FOLLOWLOCATION] = true;
-					$pest->curl_opts[CURLOPT_CONNECTTIMEOUT] = 10;
-					$pest->curl_opts[CURLOPT_TIMEOUT] = 30;
-					$thing = $pest->get('/lechecker.php', array('host' => $host, 'path' => $pathCheck, 'token' => $token, 'type' => $challengetype));
-					if(empty($thing)) {
-						$lecheckerr = _("No valid response from http://mirror1.freepbx.org");
-					} elseif(!$thing['status']) {
-						$lecheckerr = $thing['message'];
+					$pest->curl_opts[CURLOPT_CONNECTTIMEOUT] = 5;
+					$pest->curl_opts[CURLOPT_TIMEOUT] = 5;
+					try {
+						$selftest = $pest->get($pathCheck);
+					} catch(Exception $e) {
+						$selftesterr = _("Self test error: ") . get_class($e) . " - " . trim(strip_tags($e->getMessage()));
+						$hints[] = sprintf(_("Does DNS for %s resolve correctly?\nLocal DNS result: %s, External DNS result: %s"), $host, $localip, $publicip);
+						print($selftesterr ."\n");
+						@unlink($webroot.$pathCheck);
+						throw new Exception(json_encode(['type' => 'selftest', 'detail' => $selftesterr, 'hints' => $hints]));
 					}
-				} catch(Exception $e) {
-					$lecheckerr =  _("lechecker: ") . get_class($e) . " - " . trim(strip_tags($e->getMessage()));
+					if(empty($selftest)) {
+						$selftesterr = _("Self test error: no token data");
+						print($selftesterr ."\n");
+						@unlink($webroot.$pathCheck);
+						throw new Exception($selftesterr);
+					}
+					print("Self test: received ". $selftest . "\n");
+
+				//Now check freepbx.org
+				//	on failure, save error as hint and continue
+					try {
+						$pest = new \PestJSON('http://mirror1.freepbx.org');
+						$pest->curl_opts[CURLOPT_FOLLOWLOCATION] = true;
+						$pest->curl_opts[CURLOPT_CONNECTTIMEOUT] = 10;
+						$pest->curl_opts[CURLOPT_TIMEOUT] = 30;
+						$thing = $pest->get('/lechecker.php', array('host' => $host, 'path' => $pathCheck, 'token' => $token, 'type' => $challengetype));
+						if(empty($thing)) {
+							$lecheckerr = _("No valid response from http://mirror1.freepbx.org");
+						} elseif(!$thing['status']) {
+							$lecheckerr = $thing['message'];
+						}
+					} catch(Exception $e) {
+						$lecheckerr =  _("lechecker: ") . get_class($e) . " - " . trim(strip_tags($e->getMessage()));
+					}
+					if (isset($lecheckerr)) {
+						print($lecheckerr . "\n");
+						$hints[] = $lecheckerr;
+					}
+					@unlink($webroot.$pathCheck);
 				}
-				if (isset($lecheckerr)) {
-					print($lecheckerr . "\n");
-					$hints[] = $lecheckerr;
-				}
-				@unlink($webroot.$pathCheck);
 			}
 
 			//Now check let's encrypt
 			if($needsgen) {
-				$tokenpath = $webroot . "/.well-known/acme-challenge";
-				$prechallengefiles = glob($tokenpath .'/*'); // */
-				$le = new \Analogic\ACME\Lescript($location, $webroot, $logger);
+				// Build shell-safe acme.sh command arguments and environment variables (used for dns-challenge)
+				$acmeArgs = [];
+				$envVars = [];
+				$acmeArgs[] = $acmeAction;
+				if($force) {
+					$acmeArgs[] = "--force";
+				}
+				if($challengetype === 'http01') {
+					$acmeArgs[] = "-w " . $webroot;
+				}
+				elseif($challengetype === 'dns01') {
+					$acmeArgs[] = "--dns " . escapeshellarg($dnsprovider);
+					if($updateDnsCredentials) {
+						foreach ($dnsKeys as $idx => $key) {
+							if (!isset($dnsValues[$idx])) {
+								continue;
+							}
+							$value = $dnsValues[$idx];
+							$envVars[] = $key . '=' . escapeshellarg($value);
+						}
+					}
+				}
+				foreach($san AS $d) {
+					$acmeArgs[] = "-d " . escapeshellarg($d);
+				}
+
 				if($staging) {
-					$le->ca = 'https://acme-staging.api.letsencrypt.org';
+					$acmeArgs[] = '--server https://acme-staging-v02.api.letsencrypt.org/directory';
 				}
-				$le->countryCode = $countryCode;
-				$le->state = $state;
-				// Email should not be a per-cert entry.
-				// It is only used whem le account is created on first cert request.
-				// Probably should be a single module-level setup entry or removed.
-				if (!empty($email)) {
-					$le->contact = array("mailto:" . $email);
-				}
-				$le->initAccount();
-				$le->signDomains($san);
-			}
-			$this->disableFirewallLeRules();
-
-			if(!file_exists($certpath . "/private.pem") || !file_exists($certpath . "/cert.pem")) {
-				throw new Exception(_("Certificates are missing. Unable to continue"));
-			}
-
-			if(file_exists($certpath)) {
-				//https://community.letsencrypt.org/t/solved-why-isnt-my-certificate-trusted/2479/4
-				copy($certpath . "/private.pem", $certpath . ".key"); //webserver.key
-				copy($certpath . "/cert.pem", $certpath . ".crt"); //webserver.crt
-
-				//ca-bundle.crt
-				if ($removeDstRootCaX3) {
-					$caBundleContents = file_get_contents($certpath . "/chain.pem");
-					$certs = $this->parseCaBundle($caBundleContents);
-					$certs = $this->removeDstRootCaX3FromBundle($certs);
-					file_put_contents($certpath . "-ca-bundle.crt", implode("\n", $certs)."\n");
-				} else {
-					copy($certpath . "/chain.pem", $certpath . "-ca-bundle.crt");
+				// issue/renew certificate
+				$acmecmd = implode(' ', $envVars) . ' ' . escapeshellcmd($acmesettings['acmeBinary'])  
+						. ' --config-home ' . escapeshellarg($acmesettings['acmeConfDir']) 
+						. ' ' . implode(' ', $acmeArgs) . ' 2>&1';
+				exec($acmecmd, $output, $ret);
+				if($ret != 0) {
+					throw new Exception(json_encode(['type' => 'acme', 'detail' => _('acme.sh failed'), 'hints' => [implode("\n", $output)]]));
 				}
 
-				$key = file_get_contents($certpath . ".key");
-				$cert = file_get_contents($certpath . ".crt");
-				$bundle = file_get_contents($certpath . "-ca-bundle.crt");
-				file_put_contents($certpath . "-fullchain.crt", $cert . "\n" . $bundle);
-				file_put_contents($certpath . ".pem", $key . "\n" . $cert . "\n" . $bundle);
-
-				$chown[] = $certpath;
-				$exts = array(".key", ".crt", ".pem", "-ca-bundle.crt");
-				foreach($exts as $ext){
-					chmod($certpath . $ext, 0600);
-					$chown[] = $certpath . $ext;
+				// Let acme.sh install the certificate files into the target directory
+				$acmeCopyCmd = escapeshellarg($acmesettings['acmeBinary']) . ' --config-home ' 
+				. escapeshellarg($acmesettings['acmeConfDir']) . ' --install-cert -d ' . escapeshellarg($host) 
+				. ' --cert-file ' . escapeshellarg($exportBase . '.crt') . ' --key-file ' 
+				. escapeshellarg($exportBase . '.key') . ' --ca-file ' . escapeshellarg($exportBase 
+				. '-ca-bundle.crt') . ' --fullchain-file ' . escapeshellarg($exportBase . '-fullchain.crt') . ' 2>&1';
+				exec($acmeCopyCmd, $outputCopy, $retCopy);
+				if($retCopy != 0) {
+					throw new Exception(json_encode(['type' => 'acme', 'detail' => _('acme.sh failed'), 'hints' => [implode("\n", $output)]]));
 				}
-				$lefiles = array_diff(scandir($certpath), array('..', '.'));
-				foreach($lefiles as $lefile) {
-					chmod($certpath . "/" . $lefile, 0600);
-					$chown[] = $certpath . "/" . $lefile;
+				
+				// Build combined PEM file (legacy format for backward compatibility)
+				// NOTE: The .pem file contains private key + certificate + CA chain in one file.
+				// This format may still be used by other FreePBX/Asterisk components or third-party modules.
+				// Do NOT remove or change this structure without verifying downstream consumers.
+				$key = file_get_contents($exportBase . '.key');
+				if ($key === false) {
+					throw new Exception("Unable to read private key");
+				}
+				$cert = file_get_contents($exportBase . '.crt');
+				if ($cert === false) {
+					throw new Exception("Unable to read certificate");
+				}
+				$bundle = file_get_contents($exportBase . '-ca-bundle.crt');
+				if ($bundle === false) {
+					throw new Exception("Unable to read CA bundle");
+				}
+				$result = file_put_contents($exportBase . '.pem', $key . "\n" . $cert . "\n" . $bundle);
+				if ($result === false) {
+    				throw new Exception("Unable to write combined PEM file");
 				}
 			}
-			if(file_exists($location . "/_account")) {
-				$chown[] = $location . "/_account";
-				$lefiles = array_diff(scandir($location . "/_account"), array('..', '.'));
-				foreach($lefiles as $lefile) {
-					chmod($location . "/_account/" . $lefile, 0600);
-					$chown[] = $location . "/_account/" . $lefile;
-				}
+			if($challengetype === 'http01') {
+				$this->disableFirewallLeRules();
+			}
+			
+			$exts = array(".key", ".crt", ".pem", "-ca-bundle.crt");
+			foreach($exts as $ext){
+				chmod($exportBase . $ext, 0600);
+				$chown[] = $exportBase . $ext;
 			}
 			if(!empty($chown) && posix_geteuid() === 0) {
 				foreach($chown as $file) {
@@ -1099,19 +1183,16 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			}
 			return true;
 		} catch(Exception $e) {
-			$this->disableFirewallLeRules();
-			// clean up challenge tokens on failed requests
-			// we know the lechecker file name
-			@unlink($webroot.$pathCheck);
-			// Lescript,php doesn't expose the token name, assume we own any new files
-			if(isset($tokenpath) && is_dir($tokenpath)) {
-				$postchallengefiles = array_diff(glob($tokenpath .'/*'), $prechallengefiles);
-				foreach($postchallengefiles as $tokenfile) {
-					// ignore unlink errs - it's possible we don't own the new file */
-					if (is_file($tokenfile)) @unlink($tokenfile);
-				}
+			if($challengetype === 'http01') {
+				$this->disableFirewallLeRules();
+				// clean up challenge tokens on failed requests
+				// we know the lechecker file name
+				@unlink($webroot.$pathCheck);
 			}
-			$einfo = json_decode(substr($e->getMessage(), strpos($e->getMessage(), '{')), true);
+			$einfo = json_decode($e->getMessage(), true);
+			if (!is_array($einfo)) {
+    			$einfo = [];
+			}
 			if (!$einfo) $einfo = array();
 			$einfo['detail'] = !empty($einfo['detail']) ? $einfo['detail'] : $e->getMessage();
 			$einfo['type'] = !empty($einfo['type']) ? $einfo['type'] : "unknown";
