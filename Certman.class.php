@@ -986,14 +986,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 		$updateDnsCredentials = false;
 		$location = $this->PKCS->getKeysLocation();
 		$host = basename($host);
-		// $host may start with '*' for wildcard-only certificates.
-		// Sanitize before generating filesystem paths.
-		if (str_starts_with($host, '*.')) {
-			$exportName = 'wildcard_' . substr($host, 2);
-		}
-		else {
-			$exportName = $host;
-		}
+		$exportName = $this->getFileBasename($host);
 		$exportBase = $location . '/' . $exportName;
 		array_unshift($san, $host);
 
@@ -2144,6 +2137,28 @@ class Certman extends \FreePBX_Helpers implements BMO {
 	}
 
 	/**
+	* Convert a certificate basename into a filesystem-safe export name.
+ 	*
+ 	* Wildcard-only certificates may use a basename starting with '*',
+ 	* which may lead to unexpected behaviour when used directly in
+ 	* exported certificate filenames. In this case, the wildcard prefix
+	* is replaced with 'wildcard_'.
+ 	*
+ 	* Examples:
+ 	* - example.org     -> example.org
+ 	* - *.example.org   -> wildcard_example.org
+ 	*
+ 	* @param string $basename Certificate basename.
+ 	* @return string Filesystem-safe export name.
+	*/
+	private function getFileBasename(string $basename) {
+		if(str_starts_with($basename, '*.')) {
+			return 'wildcard_' . substr($basename, 2);
+		}
+		return $basename;
+	}
+
+	/**
 	 * Get Additional Details about a certificate
 	 * @param  array $details The previous details
 	 * @param  boolean $default If this is a default certificate or not
@@ -2153,10 +2168,11 @@ class Certman extends \FreePBX_Helpers implements BMO {
 		$location = $this->PKCS->getKeysLocation();
 		$files = array(".key" => "key",".crt" => "crt",".csr" => "csr",".pem" => "pem","-ca-bundle.crt" => "ca-bundle", "-fullchain.crt" => "fullchain");
 		$details['files'] = !empty($details['files']) ? $details['files'] : array();
+		$fileBasename = $this->getFileBasename($details['basename']);
 		$details['hashes'] = !empty($details['hashes']) ? $details['hashes'] : array();
 		$details['info'] = !empty($details['info']) ? $details['info'] : array();
 		foreach($files as $f => $type) {
-			$file = $location.'/'.$details['basename'].$f;
+			$file = $location.'/'.$fileBasename.$f;
 			if(file_exists($file)) {
 				if(!is_readable($file)) {
 					throw new Exception(sprintf(_("Certificate %s is not readable! Can not continue!"),$file));
