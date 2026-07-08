@@ -1,5 +1,5 @@
 <script>
-let dns_provider = '<?= $cert['additional']['dns_provider'] ?? '' ?>';
+let dns_provider = '<?= $cert['additional']['dnsprovider'] ?? '' ?>';
 </script>
 <script src='modules/certman/assets/js/views/le.js'></script>
 <?php
@@ -114,8 +114,8 @@ $alert .= "</div>";
 											</div>
 											<div class="col-md-9">
 												<select class="form-control" id="challengetype" name="challengetype">
-                                                    <option value="http01" <?php echo !empty($cert['additional']['challenge']) && $cert['additional']['challenge'] == 'http01' ? 'selected': ''?>>HTTP</option>
-                                                    <option value="dns01" <?php echo !empty($cert['additional']['challenge']) && $cert['additional']['challenge'] == 'dns01' ? 'selected': ''?>>DNS</option>
+                                                    <option value="http01" <?php echo !empty($cert['additional']['challengetype']) && $cert['additional']['challengetype'] == 'http01' ? 'selected': ''?>>HTTP</option>
+                                                    <option value="dns01" <?php echo !empty($cert['additional']['challengetype']) && $cert['additional']['challengetype'] == 'dns01' ? 'selected': ''?>>DNS</option>
                                                 </select>
 											</div>
 										</div>
@@ -158,7 +158,7 @@ $alert .= "</div>";
 														<i class="fa fa-question-circle fpbx-help-icon" data-for="dnsapi"></i>
 													</div>
 													<div class="col-md-9">
-														<?php if (!empty($cert['additional']['dnskeys'])) { ?>
+														<?php if(!empty($cert['additional']['challengetype']) && $cert['additional']['challengetype'] === 'dns01' && !empty($cert['additional']['dnsprovider'])) { ?>
 															<button type="button" class="btn btn-default" id="enableDnsEdit"><?php echo _("Edit DNS Credentials") ?></button>
 														<?php } else { ?>
 															<i id="addDnsCredential" class="fa fa-plus" style="cursor:pointer;"></i>

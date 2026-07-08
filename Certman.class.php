@@ -193,54 +193,113 @@ class Certman extends \FreePBX_Helpers implements BMO {
 						}
 					break;
 					case "le":
+						$errors = [];
 						$cert = $this->getCertificateDetails($_POST['cid']);
 						$host = $cert['basename'];
 						$description = $host;
-						$san = array_unique(array_filter(array_map('trim', explode("\n", strtolower($_POST['SAN'])))));
+						$san = array_unique(array_filter(array_map('trim', explode("\n", strtolower($_POST['SAN'] ?? '')))));
+						$challengetype = $_POST['challengetype'] ?? '';
+						$dnsprovider = trim($_POST['dnsprovider'] ?? '');
+						$dnsKeys = $_POST['dnsKeys'] ?? [];
+						$dnsValues = $_POST['dnsValues'] ?? [];
 						if (!empty($san)) {
-							if ($key = array_search($host, $san)) {
-								unset($key);
+							if (($key = array_search($host, $san, true)) !== false) {
+								unset($san[$key]);
 							}
 							sort($san);
+							foreach($san AS $tmp) {
+								if(!filter_var($tmp, FILTER_VALIDATE_DOMAIN)) {
+									$errors[] = _('Invalid Alternative name ' . htmlspecialchars($tmp));
+								}
+							}
 							$description .= ", " . implode(", ", $san);
 						}
-						$removeDstRootCaX3 = (isset($_POST['removeDstRootCaX3']) && $_POST['removeDstRootCaX3']) ? true : false;
+						
+						if(!in_array($challengetype, ['dns01', 'http01'], true)) {
+							$errors[] = _('Invalid challenge type');
+						}
+						if($challengetype === 'dns01') {
+							if(empty($dnsprovider)) {
+								$errors[] = _('DNS provider may not be empty');
+							}
+							elseif(!preg_match('/^dns_[a-z0-9]{2,}$/', $dnsprovider)) {
+								$errors[] = _('Invalid DNS provider');
+							}
+							if(count($dnsKeys) !== count($dnsValues)) {
+    							$errors[] = _('DNS API credentials are inconsistent');
+							}
+							foreach($dnsKeys AS $key => $value) {
+								$value = trim($value);
+								$dnsKeys[$key] = $value;
+								if($value === '') {
+									$errors[] = _('DNS API Key may not be empty');
+								}
+								elseif(!preg_match('/^[A-Za-z][A-Za-z0-9_]{1,63}$/', $value)) {
+									$errors[] = _('Invalid DNS API Key' . htmlspecialchars($value));
+								}
+							}
+							foreach($dnsValues AS $key => $value) {
+								$value = trim($value);
+								$dnsValues[$key] = $value;
+								/**
+								 * The content of the API key cannot be strictly validated, as different
+								 * providers may also use special characters or “dangerous” characters
+								 * in their credentials. Only a limited set of characters can be checked
+								 */
+								if(!preg_match('/^[^\r\n\0]*$/', $value)) {
+									$errors[] = _('Invalid character in DNS Api credential value');
+								}
+							}
+						}
 
+						$additional = [];
 						if(!empty($cert)) {
 							$additional = array(
-								"C" => $_POST['C'],
-								"ST" => $_POST['ST'],
-								"email" => $_POST['email'],
-								"removeDstRootCaX3" => $removeDstRootCaX3,
+								'challengetype' => $challengetype,
+								'dnsprovider' => $dnsprovider,
 							);
+							$dnsCredentialsChanged = false;
+							if (isset($_POST['dnsedit'])) {
+								$dnsCredentialsChanged = true;
+							}
 							if (!empty($san)) {$additional['san'] = $san;}
-							$removeDstRootCaX3 = (isset($_POST['removeDstRootCaX3']) && $_POST['removeDstRootCaX3']) ? true : false;
 							// check cert expiration
-							$cert = $this->getCertificateDetails($_POST['cid']);
 							$validTo = $cert['info']['crt']['validTo_time_t'];
 							$renewafter = $validTo-(86400*$this->days_expiration_alert);
 							$update = false;
 							if(time() > $validTo) {
 								$update = true;
 							}
-							if ($additional == $cert['additional'] && !$update) {
+							$certAdditional = $cert['additional'];
+							$isDifferent = false;
+							$keysToCompare = ['challengetype', 'dnsprovider', 'san'];
+							foreach ($keysToCompare as $key) {
+								$v1 = $additional[$key] ?? ($key === 'san' ? [] : '');
+								$v2 = $certAdditional[$key] ?? ($key === 'san' ? [] : '');
+								if ($v1 !== $v2) {
+									$isDifferent = true;
+									break;
+								}
+							}
+
+							if (!$isDifferent && !$update && !$dnsCredentialsChanged) {
 								$this->message = array('type' => 'success', 'message' => _('Nothing to do, no changes made'));
 								break;
 							}
+							if (!empty($errors)) {
+        						$this->message = ['type' => 'danger','message' => implode("<br>", $errors)];
+        						break;
+    						}
 							ob_start();
 							try {
-								$this->updateLE($host, array(
-									"countryCode" => $_POST['C'],
-									"state" => $_POST['ST'],
-									"challengetype" => "http", // https will not work.
-									"email" => $_POST['email'],
-									"san" => $san,
-									"removeDstRootCaX3" => $removeDstRootCaX3
-								), false, true);
+								$this->updateLE($host, $additional, $dnsKeys, $dnsValues, $dnsCredentialsChanged, false, true);
 							} catch(Exception $e) {
 								$lelog = trim(ob_get_contents());
 								ob_end_clean();
-								$einfo = json_decode(substr($e->getMessage(), strpos($e->getMessage(), '{')), true);
+								$einfo = json_decode($e->getMessage(), true);
+								if (!is_array($einfo)) {
+    								$einfo = [];
+								}
 								$api = $this->getFirewallAPI();
 								$leoptions = $api->getLeOptions();
 								if (!empty($einfo['detail'])) {
@@ -263,7 +322,6 @@ class Certman extends \FreePBX_Helpers implements BMO {
 							ob_end_clean();
 							$this->updateCertificate($cert, $description, $additional);
 							$this->message = array('type' => 'success', 'title' => _('LetsEncrypt Update Success!'), 'log' => $lelog );
-							$this->addAutoUpdateCron();
 							needreload();
 							// Reload HAProxy
 							$this->reloadHAProxyIfEnabled();
@@ -337,7 +395,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 								$value = trim($value);
 								$dnsValues[$key] = $value;
 								/**
-								 * he content of the API key cannot be strictly validated, as different
+								 * The content of the API key cannot be strictly validated, as different
 								 * providers may also use special characters or “dangerous” characters
 								 * in their credentials. Only a limited set of characters can be checked
 								 */
@@ -353,14 +411,14 @@ class Certman extends \FreePBX_Helpers implements BMO {
 						if (!empty($san)) {$additional['san'] = $san;}
 						if (!empty($errors)) {
         					$this->message = ['type' => 'danger','message' => implode("<br>", $errors)];
-        					break 2;
+        					break;
     					}
 						ob_start();
 						try{
 							if($this->checkCertificateName($host)) {
 								throw new Exception(sprintf(_("%s already exists!"),$host));
 							}
-							$this->updateLE($host, $additional, $dnsKeys, $dnsValues);
+							$this->updateLE($host, $additional, $dnsKeys, $dnsValues,);
 							$this->saveCertificate(null, $host, $description, 'le', $additional);
 						} catch(Exception $e) {
 							$lelog = trim(ob_get_contents());
@@ -795,12 +853,14 @@ class Certman extends \FreePBX_Helpers implements BMO {
 	 *
 	 * If a certificate can't be automatically updated add a notice in the interface
 	 *
-	 * @return [type] [description]
+	 *  @param bool $force Force update regardless of expiration date
+ 	 *  @return array List of status messages generated during processing
 	 */
 	public function checkUpdateCertificates($force = false) {
 		$certs = $this->getAllManagedCertificates();
 		$messages = array();
 		$nt = \notifications::create();
+		$anyUpdated = false;
 		foreach($certs as $cert) {
 			$cert = $this->getAdditionalCertDetails($cert);
 			if(empty($cert['files'])) {
@@ -821,15 +881,12 @@ class Certman extends \FreePBX_Helpers implements BMO {
 						// This will probably fail if they're using http_S_ with an expired
 						// cert, but LE should never get to this point.
 						$settings = array(
-							"countryCode" => $cert['additional']['C'] ?? '',
-							"state" => $cert['additional']['ST'] ?? '',
-							"challengetype" => "http", // https will not work
-							"email" => $cert['additional']['email'] ?? '',
+							"challengetype" => $cert['additional']['challengetype'] ?? '',
+							"dnsprovider" => $cert['additional']['dnsprovider'] ?? '',
 							"san" => $cert['additional']['san'] ?? '',
-							"removeDstRootCaX3" => $cert['additional']['removeDstRootCaX3'] ?? '',
 						);
 
-						$this->updateLE($cert['info']['crt']['subject']['CN'], $settings, false, $force);
+						$this->updateLE($cert['info']['crt']['subject']['CN'], $settings, [], [], false, false, $force);
 
 						// If that didn't throw, the certificate was succesfully updated
 						$messages[] = array('type' => 'success', 'message' => sprintf(_('Successfully updated certificate named "%s"'),$cert['basename']));
@@ -864,15 +921,12 @@ class Certman extends \FreePBX_Helpers implements BMO {
 				if($cert['type'] == 'le') {
 					try {
 						$settings = array(
-							"countryCode" => $cert['additional']['C'] ?? '',
-							"state" => $cert['additional']['ST'] ?? '',
-							"challengetype" => "http", // https will not work
-							"email" => $cert['additional']['email'] ?? '',
+							"challengetype" => $cert['additional']['challengetype'] ?? '',
+							"dnsprovider" => $cert['additional']['dnsprovider'] ?? '',
 							"san" => $cert['additional']['san'] ?? '',
-							"removeDstRootCaX3" => $cert['additional']['removeDstRootCaX3'] ?? '',
 						);
 
-						$this->updateLE($cert['info']['crt']['subject']['CN'], $settings, false, $force);
+						$this->updateLE($cert['info']['crt']['subject']['CN'], $settings, [], [], false, false, $force);
 						$messages[] = array('type' => 'success', 'message' => sprintf(_('Successfully updated certificate named "%s"'),$cert['basename']));
 						$this->FreePBX->astman->Reload();
 						//Until https://issues.asterisk.org/jira/browse/ASTERISK-25966 is fixed
@@ -909,6 +963,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			}
 			//trigger hook only if we really updated though
 			if($update) {
+				$anyUpdated = true;
 				$this->updateCertificate($cert, $cert['description'], $cert['additional']);
 				exec(fpbx_which("fwconsole")." reload");
 				// Reload HAProxy
@@ -926,7 +981,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 		}else{
 			$nt->delete("certman", "EXPIRINGCERTS");
 		}
-		if($update) {
+		if($anyUpdated) {
 			$nt->add_update("certman", "UPDATEDCERTS", _("Certificate Update"), _("Some SSL/TLS Certificates have been automatically updated. You may need to ensure all services have the correctly update certificate by restarting PBX services"), "", true,true);
 			if($nt->exists("certman", "EXPIRINGCERTS")) {
 				$nt->delete("certman", "EXPIRINGCERTS");
@@ -950,12 +1005,13 @@ class Certman extends \FreePBX_Helpers implements BMO {
 	 * @param  array $settings  Array of settings for this certificate
 	 * @param  array $dnsKeys	DNS API credential variable names (only used when challenge type is dns01)
 	 * @param  array $dnsValues	DNS API credential values (only used when challenge type is dns01)
+	 * @param  boolean $dnsCredentialsChanged 
 	 * @param  boolean $staging Whether to use the staging server or not
 	 * @param  boolean $force Force renew reguardless of expiration date
 	 *
 	 * @return boolean          True if success, false if not
 	 */
-	public function updateLE($host, $settings = false, $dnsKeys = [], $dnsValues = [], $staging = false, $force = false) {
+	public function updateLE($host, $settings = false, $dnsKeys = [], $dnsValues = [], $dnsCredentialsChanged = false, $staging = false, $force = false) {
 		/**
 		 * Enable LE rules and set a delay for disabling LE rules.
 		 * The time remaining is between 1 and 2 minutes before to close the door.
@@ -1003,16 +1059,24 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			// We don't have a cert, so we need to request one.
 			$needsgen = true;
 			$acmeAction = '--issue';
-			$updateDnsCredentials = true;
+			if($challengetype === 'dns01') {
+				$updateDnsCredentials = true;
+			}
 		} else {
 			// We DO have a certificate.
 			$certdata = openssl_x509_parse(file_get_contents($certfile));
 			// If it expires in less than a month, we want to renew it.
 			$renewafter = $certdata['validTo_time_t']-(86400*$this->days_expiration_alert);
-			if (time() > $renewafter || $force) {
+			if (time() > $renewafter) {
 				// Less than a month left, we need to renew.
 				$needsgen = true;
 				$acmeAction = '--renew';
+			}
+		}
+		if ($force && !$needsgen) {
+    		$acmeAction = '--issue';
+			if($challengetype === 'dns01' && $dnsCredentialsChanged) {
+    			$updateDnsCredentials = true;
 			}
 		}
 
@@ -1029,7 +1093,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 
 				//self-test first
 				//	if this fails the equivalent code in Lesript.php will fail cryptically
-				if($needsgen) {
+				if($needsgen || $force) {
 					$basePathCheck = "/.freepbx-known";
 					if(!file_exists($webroot.$basePathCheck)) {
 						$mkdirok = @mkdir($webroot.$basePathCheck,0777);
@@ -1088,7 +1152,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			}
 
 			//Now check let's encrypt
-			if($needsgen) {
+			if($needsgen || $force) {
 				// Build shell-safe acme.sh command arguments and environment variables (used for dns-challenge)
 				$acmeArgs = [];
 				$envVars = [];
@@ -1790,7 +1854,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 
 	/**
 	 * Get details about a specific Authority
-	 * @param {int} $cid The Certificate ID
+	 * @param int $cid The Certificate ID
 	 */
 	public function getCertificateDetails($cid) {
 		$sql = "SELECT * from certman_certs WHERE cid = ?";
@@ -1846,9 +1910,6 @@ class Certman extends \FreePBX_Helpers implements BMO {
 					throw new Exception(sprintf(_('Unable to remove %s'),$file));
 				}
 			}
-		}
-		if ($cert['type'] == 'le' && is_dir($location . "/" . $cert['basename'])) {
-			rrmdir($location . "/" . $cert['basename']);
 		}
 
 		$sql = "DELETE FROM certman_certs WHERE cid = ?";
@@ -2451,7 +2512,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 
 		try {
 			$sysadmin = $this->FreePBX->Sysadmin;
-			$haproxyEnabled = $sysadmin->getConfig("enbableHaproxy");
+			$haproxyEnabled = $sysadmin->getConfig("enableHaproxy");
 			dbug("reloadHAProxyIfEnabled: HAProxy is enabled: " . $haproxyEnabled);
 			if ($haproxyEnabled === 'enabled') {
 				// Trigger the sysadmin hook to restart HAProxy with new certificate
