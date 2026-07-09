@@ -560,8 +560,18 @@ class Certman extends \FreePBX_Helpers implements BMO {
 							$this->message = array('type' => 'danger', 'message' => _('Invalid Certificate'));
 							break;
 						}
-						$this->removeCertificate($cert['cid']);
-						$this->message = array('type' => 'success', 'message' => _('Deleted Certificate'));
+						$result = $this->removeCertificate($cert['cid']);
+						switch($result['status']) {
+							case 'success':
+								$this->message = array('type' => 'success', 'message' => _('Deleted Certificate'));
+								break;
+							case 'warning':
+								$this->message = array('type' => 'warning', 'message' => _('Deleted Certificate with warnings: ') . $result['message']);
+								break;
+							case 'error':
+								$this->message = array('type' => 'danger', 'message' => _('An error occurred while deleting the certificate. ' . $result['message']));
+								break;
+						}
 					break;
 				}
 			break;
@@ -1896,18 +1906,94 @@ class Certman extends \FreePBX_Helpers implements BMO {
 
 	/**
 	 * Remove a Certificate
-	 * @param {int} $cid The Certificate ID to remove
+	 * @param int $cid The Certificate ID to remove
+	 * @return array
 	 */
 	public function removeCertificate($cid) {
+		$status = 'success';
+		$message = '';
 		$cert = $this->getCertificateDetails($cid);
-		$location = $this->PKCS->getKeysLocation();
 		if(empty($cert)) {
-			return false;
+			return ['status' => 'error', 'message' => 'Could not get certificate details'];
 		}
 		foreach($cert['files'] as $file) {
-			if(file_exists($file)) {
-				if(!unlink($file)) {
-					throw new Exception(sprintf(_('Unable to remove %s'),$file));
+			try {
+                if(file_exists($file)) {
+                    if(!unlink($file)) {
+                        return ['status' => 'error', 'message' => sprintf(_('Unable to remove %s'),$file)];
+                    }
+                }
+            } catch(\Exception $e) {
+                return ['status' => 'error', 'message' => sprintf(_('Unable to remove %s: %s'), $file, $e->getMessage()),];
+			}
+		}
+		if($cert['type'] === 'le') {
+			//Get the path to the directory where acme.sh stored the certificate
+			$settings = $this->loadAcmeSettings();
+			exec(escapeshellarg($settings['acmeBinary']) . " --config-home " . escapeshellarg($settings['acmeConfDir']) . " --info -d " . escapeshellarg($cert['basename']) . " 2>&1", $outputInfo, $infoExitCode);
+			$certDir = '';
+			if($infoExitCode == 0) {
+				foreach($outputInfo AS $line) {
+					if(str_starts_with($line, 'DOMAIN_CONF=')) {
+						$certDir = dirname(substr($line, strlen('DOMAIN_CONF=')));
+						break;
+					}
+				}
+			}
+			//Tell acme.sh it should remove the configuration of this certificate
+			exec(escapeshellarg($settings['acmeBinary']) . " --config-home " . escapeshellarg($settings['acmeConfDir']) . " --remove -d " . escapeshellarg($cert['basename']) . " 2>&1", $outputRemoveCert, $removeCertExitCode);
+			if($removeCertExitCode != 0) {
+				$errormsg = implode('<br>', $outputRemoveCert);
+				$status = 'warning';
+				$message = sprintf(_('acme.sh was unable to remove the configuration: %s '),$errormsg);
+			}
+			//Remove the directory
+			if($certDir != '') {
+				// Don't use FreePBX rrmdir() here because the certificate directory
+				// may contain '*' (wildcard certificates). rrmdir() uses glob(), which
+				// would treat '*' as a wildcard and could delete unintended directories.
+				$entries = scandir($certDir);
+				foreach ($entries as $entry) {
+					try {
+						if ($entry === '.' || $entry === '..') {
+							continue;
+						}
+						$path = $certDir . '/' . $entry;
+						if (is_dir($path)) {
+							rmdir($path);
+						} else {
+							if(!unlink($path)) {
+								if($status !== 'warning') {
+									$status = 'warning';
+									$message = sprintf(_('Unable to remove %s: %s'), $path);
+								}
+							}
+						}
+					} catch(\Exception $e) {
+						if($status !== 'warning') {
+							$status = 'warning';
+							$message = sprintf(_('Unable to remove %s: %s'), $path, $e->getMessage());
+						}
+					}
+				}
+				try {
+					if(!rmdir($certDir)) {
+						if($status !== 'warning') {
+							$status = 'warning';
+							$message = sprintf(_('Unable to remove %s'),$certDir);
+						}
+				}
+				} catch(\Exception $e) {
+					if($status !== 'warning') {
+						$status = 'warning';
+						$message = sprintf(_('Unable to remove %s: %s'), $certDir, $e->getMessage());
+					}
+				}
+			} else {
+				if($status !== 'warning') {
+					$acmeOutput = implode('<br>', $outputRemoveCert);
+					$status = 'warning';
+					$message = _('Unable to get the directory where acme.sh stored the certificate. Please remove the directory manually. You can find the path in the following output:' . $acmeOutput);
 				}
 			}
 		}
@@ -1915,7 +2001,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 		$sql = "DELETE FROM certman_certs WHERE cid = ?";
 		$sth = $this->db->prepare($sql);
 		$sth->execute(array($cid));
-		return true;
+		return ['status' => $status, 'message' => $message];
 	}
 
 	/**
