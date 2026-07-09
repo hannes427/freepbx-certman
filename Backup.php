@@ -18,7 +18,8 @@ class Backup Extends Base\BackupBase{
       'managedCerts' => $this->certman->getAllManagedCertificates(),
       'managedCSRs' => $this->certman->getAllManagedCSRs(),
       'dtlsOptions' => $this->certman->getAllDTLSOptions(),
-      'keyDir' => $this->certman->PKCS->getKeysLocation()
+      'keyDir' => $this->certman->PKCS->getKeysLocation(),
+      'kvStore' => $this->dumpKVStore()
     ];
   }
   

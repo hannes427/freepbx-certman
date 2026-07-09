@@ -657,7 +657,7 @@ class Certman extends \FreePBX_Helpers implements BMO {
 				}
 				if($acmeUpdateMethod == 'cron') {
 					$this->removeCronJob();
-					$add_cron = exec('HOME=' . escapeshellarg($acmeConfDir) . ' ' . escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --installcronjob 2>&1", $cronOutput, $cronExitCode);
+					$add_cron = exec('HOME=' . dirname(escapeshellarg($acmeConfDir)) . ' ' . escapeshellarg($acmeBinary) . " --config-home " . escapeshellarg($acmeConfDir) . " --installcronjob 2>&1", $cronOutput, $cronExitCode);
 					if($cronExitCode != 0) {
 						$errormsg = _('Could not save ACME configuration. The following errors occurred<br>') . implode("<br>", array_map('htmlspecialchars', $cronOutput));
 						$this->message = array('type' => 'danger', 'message' => $errormsg);
@@ -1322,22 +1322,8 @@ class Certman extends \FreePBX_Helpers implements BMO {
 	 */
 	public function chownFreepbx() {
 		$certs = $this->getAllManagedCertificates();
-		$location = $this->PKCS->getKeysLocation();
-		$files[] = array('type' => 'rdir',
-				'path' => $location . "/_account",
-				'perms' => 0600);
-		$files[] = array('type' => 'file',
-				'path' => $location . "/_account",
-				'perms' => 0755);
+		$files = array();
 		foreach($certs as $cert) {
-			if ($cert['type'] == 'le') {
-				$files[] = array('type' => 'rdir',
-					'path' => $location . "/" . $cert['basename'],
-					'perms' => 0600);
-				$files[] = array('type' => 'file',
-					'path' => $location . "/" . $cert['basename'],
-					'perms' => 0755);
-			}
 			$details = $this->getCertificateDetails($cert['cid']);
 			if(!empty($details['files'])) {
 				foreach($details['files'] as $file) {

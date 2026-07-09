@@ -46,6 +46,10 @@ class Restore Extends Base\RestoreBase{
 			$dtls['certificate'] = $dtls['cid'];
 			$this->certman->addDTLSOptions($dtls['id'], $dtls);
 		}
+		if(array_key_exists('kvStore', $configs)) {
+            $this->importKVStore($configs['kvStore']);
+        }
+
 		return $this;
 	}
 
