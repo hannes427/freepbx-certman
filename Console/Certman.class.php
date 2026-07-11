@@ -35,9 +35,9 @@ class Certman extends Command {
 				new InputOption('generate', null, InputOption::VALUE_NONE, _('Generate Certificate')),
 				new InputOption('type', null, InputOption::VALUE_REQUIRED, _('Certificate generation type - "le" for LetsEncrypt')),
 				new InputOption('hostname', null, InputOption::VALUE_REQUIRED, _('Certificate hostname (LetsEncrypt Generation)')),
-				new InputOption('country-code', null, InputOption::VALUE_REQUIRED, _('Country Code (LetsEncrypt Generation)')),
-				new InputOption('state', null, InputOption::VALUE_REQUIRED, _('State/Provence/Region (LetsEncrypt Generation)')),
-				new InputOption('email', null, InputOption::VALUE_REQUIRED, _("Owner's email (LetsEncrypt Generation)")),
+				new InputOption('challengetype', null, InputOption::VALUE_REQUIRED, _('Challenge type (http01 or dns01)')),
+				new InputOption('dnsprovider', null, InputOption::VALUE_REQUIRED, _('DNS API provider')),
+				new InputOption('apicredentials', null, InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY, _('DNS Api Credentials (format: key=value)')),
 				new InputOption('san', null, InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY, _("Certificate Subject Alternative Name(s) (LetsEncrypt Generation)")),
 
 				new InputOption('delete', null, InputOption::VALUE_REQUIRED, _('Delete certificate by id or hostname')),
@@ -60,32 +60,87 @@ class Certman extends Command {
 				case 'letsencrypt';
 				case 'le':
 					$hostname = strtolower((string)$input->getOption('hostname'));
-					$country_code = $input->getOption('country-code');
-					$state = $input->getOption('state');
-					$email = $input->getOption('email');
 					$description = $hostname;
 					$san = array_unique(array_filter(array_map(function ($v) {return strtolower(trim($v));}, $input->getOption('san'))));
+					$challengetype = $input->getOption('challengetype');
+					$dnsprovider = $input->getOption('dnsprovider');
+					$dnsapicredentials = $input->getOption('apicredentials');
 					$force = $input->getOption('force');
 					$cert = $certman->getCertificateDetailsByBasename($hostname);
 
-					if (!($hostname && $country_code && $state && $email)) {
-						$output->writeln("<error>"._("Missing required argument(s) - 'hostname', 'country-code', 'state' and 'email' are required")."</error>");
+					if (!($hostname && $challengetype)) {
+						$output->writeln("<error>"._("Missing required argument(s) - 'hostname' and 'challengetype' are required")."</error>");
+						exit(4);
+					}
+
+					if(!filter_var($hostname, FILTER_VALIDATE_DOMAIN)) {
+						$output->writeln("<error>"._("Invalid hostname")."</error>");
 						exit(4);
 					}
 
 					if (!empty($san)) {
-						if ($key = array_search($hostname, $san)) {
-							unset($key);
+						if (($key = array_search($hostname, $san, true)) !== false) {
+							unset($san[$key]);
 						}
 						sort($san);
+						foreach($san AS $tmp) {
+							if(!filter_var($tmp, FILTER_VALIDATE_DOMAIN)) {
+								$output->writeln("<error>"._("Invalid Alternative name "). $tmp . "</error>");
+								exit(4);
+							}
+						}
 						$description .= ", " . implode(", ", $san);
 					}
 
+					if(!in_array($challengetype, ['dns01', 'http01'], true)) {
+						$output->writeln("<error>"._("Invalid challenge type")."</error>");
+						exit(4);
+					}
+					$dnsCredentialsChanged = false;
+					$dnsKeys = [];
+					$dnsValues = [];
+					if($challengetype === 'dns01') {
+						if(empty($dnsprovider)) {
+							$output->writeln("<error>"._("DNS provider may not be empty")."</error>");
+							exit(4);
+						}
+						elseif(!preg_match('/^dns_[a-z0-9]{2,}$/', $dnsprovider)) {
+							$output->writeln("<error>"._("Invalid DNS provider")."</error>");
+							exit(4);
+						}
+						if(!empty($dnsapicredentials)) {
+							$dnsCredentialsChanged = true;
+							foreach($dnsapicredentials AS $pair) {
+								if(strpos($pair, '=') === false) {
+									$output->writeln("<error>"._("Invalid DNS API credential format (use key=value)")."</error>");
+									exit(4);
+								}
+								//split the pair into key and value
+								list($key, $value) = explode('=', $pair, 2);
+								$key = trim($key);
+								$value = trim($value);
+								if($key === '' || $value === '') {
+									$output->writeln("<error>"._("DNS API Key may not be empty")."</error>");
+									exit(4);
+								}
+								elseif(!preg_match('/^[A-Za-z][A-Za-z0-9_]{1,63}$/', $key)) {
+									$output->writeln("<error>"._("Invalid character in DNS Api credential key")."</error>");
+									exit(4);
+								}
+								elseif(!preg_match('/^[^\r\n\0]*$/', $value)) {
+									$output->writeln("<error>"._("Invalid character in DNS Api credential value")."</error>");
+									exit(4);
+								}
+								$dnsKeys[] = $key;
+								$dnsValues[] = $value;
+
+							}
+						}
+					}
+
 					$additional = array(
-						"C" => $country_code,
-						"ST" => $state,
-						"email" => $email,
-						"removeDstRootCaX3" => false,
+						'challengetype' => $challengetype,
+						'dnsprovider' => $dnsprovider,
 					);
 					if (!empty($san)) {$additional['san'] = $san;}
 
@@ -103,16 +158,7 @@ class Certman extends Command {
 					}
 
 					try {
-						$settings = array(
-							"countryCode" => $country_code,
-							"state" => $state,
-							"challengetype" => "http", // https will not work.
-							"email" => $email,
-							"san" => $san,
-							"removeDstRootCaX3" => false,
-						);
-
-						$le_result = $certman->updateLE($hostname, $settings, false, $force);
+						$le_result = $certman->updateLE($hostname, $additional, $dnsKeys, $dnsValues, $dnsCredentialsChanged, false, $force);
 						if (!isset($cert['cid'])) {
 							$cid = $certman->saveCertificate(
 								null,

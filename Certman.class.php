@@ -818,6 +818,36 @@ class Certman extends \FreePBX_Helpers implements BMO {
 			];
 	}
 
+	/**
+	 * rscandir
+	 * 
+	 * This function scans recursively a directory and returns a 
+	 * multidimensional array with files and subdirectories
+	 * 
+	 * @param string $directory
+	 * @return array
+	 */
+	private function rscandir($directory) {
+		$result = ['files' => [], 'directories' => []];
+        $entries = scandir($directory);
+        foreach($entries AS $entry) {
+        	if($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $filename = $directory . '/' . $entry;
+            if(is_dir($filename)) {
+                $result['directories'][] = $filename;
+                $subResult = $this->rscandir($filename);
+                $result['directories'] = array_merge($result['directories'], $subResult['directories']);
+                $result['files'] = array_merge($result['files'], $subResult['files']);
+            }
+            elseif(is_file($filename)) {
+                $result['files'][] = $filename;
+            }
+        }
+        return $result;
+	}
+
 	public function getActionBar($request) {
 		$buttons = array();
 		$request['action'] = !empty($request['action']) ? $request['action'] : "";
@@ -1247,6 +1277,15 @@ class Certman extends \FreePBX_Helpers implements BMO {
 					chown($file, $user);
 					chgrp($file, $group);
 				}
+				$entries = $this->rscandir($acmesettings['acmeConfDir']);
+				foreach($entries['files'] as $file) {
+					chown($file, $user);
+					chgrp($file, $group);
+				}
+				foreach($entries['directories'] as $dir) {
+					chown($dir, $user);
+					chgrp($dir, $group);
+				}				
 			}
 			return true;
 		} catch(Exception $e) {
@@ -1338,6 +1377,34 @@ class Certman extends \FreePBX_Helpers implements BMO {
 						'path' => $file,
 						'perms' => 0600);
 				}
+			}
+		}
+		$settings = $this->loadAcmeSettings();
+		if(!empty($settings['acmeConfDir'])) {
+			$files[] = array('type' => 'rdir',
+				'path' => $settings['acmeConfDir'],
+				'perms' => 0750);
+			// Don't use $settings['acmeBinary'] here. If acme.sh is not installed in the
+			// user home folder, chown should not set the owner to the asterisk user
+			if(file_exists($settings['acmeConfDir'] . '/acme.sh')) {
+				$files[] = array('type' => 'file',
+					'path' => $settings['acmeConfDir'] . '/acme.sh',
+					'perms' => 0750);
+			}
+			if(is_dir($settings['acmeConfDir'] . '/deploy')) {
+				$files[] = array('type' => 'execdir',
+					'path' => $settings['acmeConfDir'] . '/deploy',
+					'perms' => 0750);
+			}
+			if(is_dir($settings['acmeConfDir'] . '/dnsapi')) {
+				$files[] = array('type' => 'execdir',
+					'path' => $settings['acmeConfDir'] . '/dnsapi',
+					'perms' => 0750);
+			}
+			if(is_dir($settings['acmeConfDir'] . '/notify')) {
+				$files[] = array('type' => 'execdir',
+					'path' => $settings['acmeConfDir'] . '/notify',
+					'perms' => 0750);
 			}
 		}
 		return $files;
@@ -1938,41 +2005,49 @@ class Certman extends \FreePBX_Helpers implements BMO {
 				// Don't use FreePBX rrmdir() here because the certificate directory
 				// may contain '*' (wildcard certificates). rrmdir() uses glob(), which
 				// would treat '*' as a wildcard and could delete unintended directories.
-				$entries = scandir($certDir);
-				foreach ($entries as $entry) {
+				$entries = $this->rscandir($certDir);
+				foreach ($entries['files'] as $file) {
 					try {
-						if ($entry === '.' || $entry === '..') {
-							continue;
-						}
-						$path = $certDir . '/' . $entry;
-						if (is_dir($path)) {
-							rmdir($path);
-						} else {
-							if(!unlink($path)) {
-								if($status !== 'warning') {
-									$status = 'warning';
-									$message = sprintf(_('Unable to remove %s: %s'), $path);
-								}
+						if(!unlink($file)) {
+							if($status !== 'warning') {
+								$status = 'warning';
+								$message = sprintf(_('Unable to remove file: %s'), $file);
 							}
 						}
 					} catch(\Exception $e) {
 						if($status !== 'warning') {
 							$status = 'warning';
-							$message = sprintf(_('Unable to remove %s: %s'), $path, $e->getMessage());
+							$message = sprintf(_('Unable to remove file: %s'), $file, $e->getMessage());
 						}
 					}
+				}
+				foreach(array_reverse($entries['directories']) as $dir)	{
+					try {
+						if(!rmdir($dir)) {
+							if($status !== 'warning') {
+								$status = 'warning';
+								$message = sprintf(_('Unable to remove directory: %s'), $dir);
+							}
+						}
+					} catch(\Exception $e) {
+						if($status !== 'warning') {
+							$status = 'warning';
+							$message = sprintf(_('Unable to remove directory: %s'), $dir, $e->getMessage());
+						}
+					}
+
 				}
 				try {
 					if(!rmdir($certDir)) {
 						if($status !== 'warning') {
 							$status = 'warning';
-							$message = sprintf(_('Unable to remove %s'),$certDir);
+							$message = sprintf(_('Unable to remove directory '),$certDir);
 						}
 				}
 				} catch(\Exception $e) {
 					if($status !== 'warning') {
 						$status = 'warning';
-						$message = sprintf(_('Unable to remove %s: %s'), $certDir, $e->getMessage());
+						$message = sprintf(_('Unable to remove directory: %s'), $certDir, $e->getMessage());
 					}
 				}
 			} else {
